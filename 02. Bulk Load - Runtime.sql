@@ -7,9 +7,6 @@
 *                                                                                                   *                                                                           *
 *  Provide feedback to greg.pavlik at snowflake.com                                                 *
 *                                                                                                   *
-*  >>> Latest release and complete documentation is available here: <<<                             *
-*                                                                                                   *
-*  https://drive.google.com/drive/folders/13LF-H-sAKGBkiR7HnYDyKiFlULYgaFDd?usp=sharing             *
 *                                                                                                   *
 *  ==> Purpose: This project loads a large number of files from stage to a table in a specified     *
 *               order. You can create these objects in any database you choose. You must create     *
