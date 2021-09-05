@@ -1,41 +1,61 @@
 -- Worksheet 03.Bulk Load - Set/Reset
--- Last modified 2020-04-17
+-- Last modified 2020-09-04
+
+/********************************************************************************************************
+*                                                                                                       *
+*                                     Snowflake Bulk Load Project                                       *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+*  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in  *
+*. compliance with the License. You may obtain a copy of the License at                                 *
+*                                                                                                       *
+*                               http://www.apache.org/licenses/LICENSE-2.0                              *
+*                                                                                                       *
+*  Unless required by applicable law or agreed to in writing, software distributed under the License    *
+*  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  *
+*  implied. See the License for the specific language governing permissions and limitations under the   *
+*  License.                                                                                             *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+********************************************************************************************************/
 
 /****************************************************************************************************
 *                                                                                                   *
-*  This script sets and resets the control table and target table.                                  *
+*  This script sets and resets the control table and target tables.                                 *
 *  Click on the "All Queries" checkbox and run all statements to reset unit tests.                  *
-*                                                                                                   * 
+*                                                                                                   *
 *  This script *is* possibly useful for production environments. If the LIST command does not       *
 *  time out, you can use the LIST command here to populate the control table.                       *
 *                                                                                                   *
 ****************************************************************************************************/
-
-
-/****************************************************************************************************
-*                                                                                                   *
-*  Convert the last modified value from the Snowflake LIST command into a timestamp.                *
-*                                                                                                   *
-****************************************************************************************************/
-create or replace function LAST_MODIFIED_TO_TIMESTAMP(LAST_MODIFIED string) 
-returns timestamp_tz
-as
-$$
-    to_timestamp_tz(left(LAST_MODIFIED, len(LAST_MODIFIED) - 4) || ' ' || '00:00', 'DY, DD MON YYYY HH:MI:SS TZH:TZM')
-$$;
 
 /****************************************************************************************************
 *                                                                                                   *
 *  Create a sample table for testing. Skip if this is a production use of the project.              *
 *                                                                                                   *
 ****************************************************************************************************/
-create or replace table TARGET_TABLE like "SNOWFLAKE_SAMPLE_DATA"."TPCH_SF1000"."ORDERS";
+create or replace transient table ORDERS   like "SNOWFLAKE_SAMPLE_DATA"."TPCH_SF10000"."ORDERS";
+create or replace transient table JORDERS  like "SNOWFLAKE_SAMPLE_DATA"."TPCH_SF10000"."JORDERS";
+create or replace transient table LINEITEM like "SNOWFLAKE_SAMPLE_DATA"."TPCH_SF10000"."LINEITEM";
 
+
+-- For now, just insert these into the statements table +++++++++ TO DO MORE HERE!!!
+truncate COPY_INTO_STATEMENTS;
+
+insert into COPY_INTO_STATEMENTS
+    (
+     STATEMENT_NAME
+    ,STATEMENT_TEXT
+    )
+values
+    ('ORDERS',   'copy into ORDERS   from @TEST_STAGE file_format=(type=CSV) on_error=continue'),
+    ('JORDERS',  'copy into JORDERS  from @TEST_STAGE file_format=(type=CSV) on_error=continue'),
+    ('LINEITEM', 'copy into LINEITEM from @TEST_STAGE file_format=(type=CSV) on_error=continue');
 
 /****************************************************************************************************
-*                                                                                                   *
 *  Reset the control table if it's already been created.                                            *
-*                                                                                                   *
 ****************************************************************************************************/
 truncate table if exists FILE_INGEST_CONTROL;
    
@@ -46,13 +66,23 @@ truncate table if exists FILE_INGEST_CONTROL;
 *  This section *is* useful in a production environment if the LIST command returns (does not       *
 *  time out) and returns the file list you need.                                                    *
 *                                                                                                   *
-****************************************************************************************************/   
+****************************************************************************************************/
 list @TEST_STAGE/TPCH/;
 
 insert into FILE_INGEST_CONTROL
-    (FILE_PATH, INGESTION_ORDER, FILE_SIZE) 
+    (
+     FILE_PATH, 
+     COPY_INTO_NAME,
+     INGESTION_ORDER, 
+     FILE_SIZE
+    )
     select 
-        "name", 
+        "name",
+        case
+            when "name" like '%/TPCH/ORDERS/%'   then 'ORDERS'      -- Specify which COPY_INTO statement to use for each set of files.
+            when "name" like '%/TPCH/JORDERS/%'  then 'JORDERS'
+            when "name" like '%/TPCH/LINEITEM/%' then 'LINEITEM'
+        end,
         LAST_MODIFIED_TO_TIMESTAMP("last_modified"),
         "size"
 from table(result_scan(last_query_id()));
@@ -62,17 +92,23 @@ select * from FILE_INGEST_CONTROL order by INGESTION_ORDER asc limit 10;
 
 -- Recommended values for FILE_TO_PROCESS and FILES_AT_ONCE
 with
-PARAMS(WAREHOUSE_SIZE, CORES, FILES_TO_PROCESS, AVG_MB, FILES_AT_ONCE)
+PARAMS(WAREHOUSE_SIZE, NUMBER_OF_WAREHOUSES, CORES, FILES_TO_PROCESS, AVG_MB, FILES_AT_ONCE_PER8_WH, FILES_AT_ONCE)
 as
 (
-select  'Small'                                             as WAREHOUSE_SIZE,     --Change to the size you plan to use
+select  'X-Small'                                           as WAREHOUSE_SIZE,        --Change to the size you plan to use
+        1                                                   as NUMBER_OF_WAREHOUSES,  --Change to the number of warehouses you will run the SP in parallel
         nodes_per_warehouse(WAREHOUSE_SIZE) * 8             as CORES,
         count(*)                                            as FILES_TO_PROCESS,
-        avg(FILE_SIZE)/1000000                              as AVG_MB,  
-        ceil((512 / AVG_MB) / CORES) * CORES                as FILES_AT_ONCE
+        avg(FILE_SIZE)/2000000                              as AVG_MB,  
+        ceil((512 / AVG_MB) / CORES) * CORES                as FILES_AT_ONCE_PER8_WH,
+        FILES_AT_ONCE_PER8_WH * 
+        (ceil(8 / NUMBER_OF_WAREHOUSES) * 
+        NUMBER_OF_WAREHOUSES / 8)::integer                 as FILES_AT_ONCE
 from    FILE_INGEST_CONTROL
 )
-select  FILES_TO_PROCESS, FILES_AT_ONCE
+select  FILES_TO_PROCESS, 
+        iff(FILES_AT_ONCE > 1000, 1000, 
+            iff(FILES_AT_ONCE < CORES, CORES, FILES_AT_ONCE)) as FILES_AT_ONCE
 from    PARAMS;
   
 /****************************************************************************************************
