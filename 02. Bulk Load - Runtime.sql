@@ -1,12 +1,31 @@
 -- Worksheet 02.Bulk Load - Runtime
--- Last modified 2020-04-17
+-- Last modified 2021-09-04
+
+/********************************************************************************************************
+*                                                                                                       *
+*                                     Snowflake Bulk Load Project                                       *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+*  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in  *
+*. compliance with the License. You may obtain a copy of the License at                                 *
+*                                                                                                       *
+*                               http://www.apache.org/licenses/LICENSE-2.0                              *
+*                                                                                                       *
+*  Unless required by applicable law or agreed to in writing, software distributed under the License    *
+*  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  *
+*  implied. See the License for the specific language governing permissions and limitations under the   *
+*  License.                                                                                             *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+********************************************************************************************************/
 
 /****************************************************************************************************
 *                                                                                                   *
-*                              ***  Snowflake Bulk Load Project  ***                                *
-*                                                                                                   *                                                                           *
-*  Provide feedback to greg.pavlik at snowflake.com                                                 *
+*                              ***  Snowflake Bulk Load Project  ***                                *          
 *                                                                                                   *
+*  https://drive.google.com/drive/folders/13LF-H-sAKGBkiR7HnYDyKiFlULYgaFDd                         *
 *                                                                                                   *
 *  ==> Purpose: This project loads a large number of files from stage to a table in a specified     *
 *               order. You can create these objects in any database you choose. You must create     *
@@ -26,59 +45,33 @@
 *                                                                                                   *
 *  ==> Running: 1) Make sure your COPY INTO statement works for the stage and table before running. *
 *               2) REPLACE the target table after testing the COPY INTO statement in step 1.        *
-*               3) Copy your working COPY INTO statement and paste it into the "GetCopyTemplate"    *
-*                  User Defined Function.NOTE: Leave "files=( @~FILE_LIST~@ )" at the end of your   *
-*                  COPY INTO statement.                                                             *
+*               3) Copy your working COPY INTO statement and paste it into the STATEMENT_TEXT       *
+*                  column of the COPY_INTO_STATEMENTS table.                                        *
+*                  NOTE: Place "files=( @~FILE_LIST~@ )" at the end of your COPY INTO statement.    *
 *               4) ==> IMPORTANT <== Run the create or replace function GetCopyTemplate()           *
 *                  If you don't run it after modifying it, calling the function will return the     *
 *                  sample value. This will be confusing to troubleshoot since the COPY INTO         *
 *                  statement will look right. Be sure to run create or replace GetCopyTemplate()    *
-*               5) Run a single instance of the FileIngest stored procedure with a small number of  *
+*               5) Run a single instance of the FILE_INGEST stored procedure with a small number of *
 *                  files specified in the parameters.                                               *
 *               6) Examine results, and if everything looks good run multiple copies of the stored  *
 *                  procedure in parallel EACH USING ITS OWN WAREHOUSE. It defeats the purpose of    *
 *                  the project if they run in the same warehouse. Increase the number of files in   *
 *                  testing until the SP runs at least five minutes per run.                         *
 *               7) Automate running a bulk load. Create multiple Snowflake TASKs to run the         *
-*                  FileIngest stored procedure. Ensure that each TASK runs in a different           *
+*                  FILE_INGEST stored procedure. Ensure that each TASK runs in a different          *
 *                  warehouse. Set the tasks to run once per minute. (They will not re-run if they   *
 *                  are still running from the last execution.) Set the stored procedure to run      *
 *                  a long time, perhaps 60 minutes.                                                 *
-*               8) ===> IMPORTANT <=== When the table is fully loaded, suspend the TASKs.           *
+*               8) ===> IMPORTANT <=== For one-time loads, when done, suspend the TASKs.            *
 *                                                                                                   *
 ****************************************************************************************************/
-
-create or replace function GetCopyTemplate()
-returns string
-language javascript
-as
-$$
-/****************************************************************************************************
-*                                                                                                   *
-*   This is a simple COPY INTO statement. Use yours, but you must keep the                          *
-*   files=( @~FILE_LIST~@ ) part in the statement. Never use that token in the comments.            *
-*   The stored procedure will replace the token with a list of files.                               *
-*                                                                                                   *
-*   =====> IMPORTANT! <===== Run this create or replace after modifying.                            *
-*                                                                                                   *
-****************************************************************************************************/
-return `
--- Do not modify this UDF above this line.
-----------------------------------------------------------------------------------------------------
-
-
-copy into TARGET_TABLE from @TEST_STAGE file_format=(type=CSV) files=( @~FILE_LIST~@ ) ;            --    <=== Replace with your COPY INTO statement
-
-
-----------------------------------------------------------------------------------------------------
--- Do not modify this UDF below this line.
-`;
-$$;
 
 -- Required User Defined Function.
 create or replace function STAGE_PATH_SHORTEN(FILE_PATH string)
 returns string
 language javascript
+strict immutable
 as
 $$
     /*
@@ -120,33 +113,41 @@ $$
     throw "Unknown file path type."
 $$;
 
+-- Write a stored procedure to control this table:
+create or replace table COPY_INTO_STATEMENTS
+    (
+     STATEMENT_NAME      string                                 -- The name to specify which COPY INTO statement to use for a file
+    ,STATEMENT_TEXT      string                                 -- The text of the COPY INTO statement including files=( @~FILE_LIST~@ ) at the appropriate location
+    ,EFFECTIVE           timestamp_tz default current_timestamp -- The effective date of the COPY INTO statement for this table
+    ,SUPERSEDED          timestamp_tz                           -- The date when the COPY INTO statement will expire and a new one will supersede it
+    );
+
 -- Create a control table to drive the stored procedure. 
--- (This may be a good place to put the killswitch,)
--- (Actually, just change "WAITING" to "SUSPENDED")
 create or replace table FILE_INGEST_CONTROL 
     (
-    FILE_PATH           string,                         -- The file path in the stage                                   
-    INGESTION_ORDER     timestamp_tz,                   -- Can be any sortable data type. Used only for ORDER BY.       
-    INGESTION_STATUS    string      default 'WAITING',  -- Status set by COPY INTO results.                             
-    OWNER_SESSION       integer,                        -- The session_id running this stored procedure.                
-    EXEC_UUID           string,                         -- A unique separator in case two SPs run in the same session   
-    TRY_COUNT           integer     default 0,          -- The number of times a file has been tried in a COPY INTO     
-    START_TIME          timestamp,                      -- The last time a file was sent as part of a COPY INTO         
-    END_TIME            timestamp,                      -- The last a COPY INTO returned with this file sent to it      
-    FILE_SIZE           bigint,                         -- Used to collect statistics. Not needed or used by this SP.   
-    ERROR_MSG           string                          -- The error message (if any) on the most recent COPY INTO      
+     FILE_PATH           string                         -- The file path in the stage                                   
+    ,COPY_INTO_NAME      string                         -- The name of the copy into statement to use for this file.    
+    ,INGESTION_ORDER     timestamp_tz                   -- Can be any sortable data type. Used only for ORDER BY.       
+    ,INGESTION_STATUS    string      default 'WAITING'  -- Status set by COPY INTO results.                             
+    ,OWNER_SESSION       integer                        -- The session_id running this stored procedure.                
+    ,EXEC_UUID           string                         -- A unique separator in case two SPs run in the same session   
+    ,TRY_COUNT           integer     default 0          -- The number of times a file has been tried in a COPY INTO     
+    ,START_TIME          timestamp                      -- The last time a file was sent as part of a COPY INTO         
+    ,END_TIME            timestamp                      -- The last a COPY INTO returned with this file sent to it      
+    ,FILE_SIZE           bigint                         -- Used to collect statistics. Not needed or used by this SP.   
+    ,ERROR_MSG           string                         -- The error message (if any) on the most recent COPY INTO      
     );
 
 -- Create the stored procedure to load the target table
 create or replace procedure FILE_INGEST(
-                                        STAGE_NAME          string,
-                                        COPY_TEMPLATE       string,
-                                        CONTROL_TABLE       string,
-                                        SORT_ORDER          string,
-                                        FILES_TO_PROCESS    float,
-                                        FILES_AT_ONCE       float,
-                                        MAX_RUN_MINUTES     float,
-                                        TRIES               float
+                                         STAGE_NAME              string
+                                        ,CONTROL_TABLE           string
+                                        ,COPY_STATEMENTS_TABLE   string
+                                        ,SORT_ORDER              string
+                                        ,FILES_TO_PROCESS        float
+                                        ,FILES_AT_ONCE           float
+                                        ,MAX_RUN_MINUTES         float
+                                        ,TRIES                   float
                                        )
 returns  variant
 language javascript
@@ -157,119 +158,132 @@ $$
 * Stored procedure to load a large table from a stage with a large number of files.                 *
 * Note that this procedure requires a control table with a specific format [DDL to follow].         *
 *                                                                                                   *
-* @param  {string}  STAGE_NAME:         The name of the stage from which to load files              *
-* @param  {string}  TARGET_TABLE:       The table to load from the stage files                      *
-* @param  {string}  COPY_TEMPLATE:      The name of the UDF to call to get the COPY INTO template   *
-* @param  {string}  CONTROL_TABLE:      The name of the table that controls this procedure          *
-* @param  {string}  SORT_ORDER:         The column that controls the order of file loading          *
-* @param  {string}  FILES_TO_PROCESS:   The total number of files to process in one procedure run   *
-* @param  {float}   FILES_AT_ONCE:      The number of files to load in a single transaction         *
-* @param  {float}   MAX_RUN_MINUTES:    The maximum run time allowed for a new pass to start        *
-* @param  {float}   TRIES float         The times to try loading a file, If > 1 it will retry       *
-* @return {string}:                     A JSON with statistics from the execution.                  *
+* @param  {string}  STAGE_NAME:           The name of the stage from which to load files            *
+* @param  {string}  CONTROL_TABLE:        The name of the table that controls this procedure        *
+* @param  {string}  COPY_STATEMENTS_TABLE The name of the table with the copy into statements.      *
+* @param  {string}  SORT_ORDER:           The column that controls the order of file loading        *
+* @param  {string}  FILES_TO_PROCESS:     The total number of files to process in one procedure run *
+* @param  {float}   FILES_AT_ONCE:        The number of files to load in a single transaction       *
+* @param  {float}   MAX_RUN_MINUTES:      The maximum run time allowed for a new pass to start      *
+* @param  {float}   TRIES float           The times to try loading a file, If > 1 it will retry     *
+* @return {variant}:                      A JSON with statistics from the execution.                *
 *                                                                                                   *
 ****************************************************************************************************/
 
-    var out = {};
-    
-    var parameterError = CheckParameters(FILES_TO_PROCESS, FILES_AT_ONCE, SORT_ORDER, MAX_RUN_MINUTES, TRIES);
-    
-    if(parameterError != "No_Errors"){
-        out["Parameter_Error"] = parameterError;
-        return out;
-    }
+class File{}
 
-    var i = 0;
-    var filesClaimed = -1;
-    var filesProcessed = 0;
-    var filesRS;
-    var passes = Math.ceil(FILES_TO_PROCESS / FILES_AT_ONCE);
+let out = {};
+let parameterError = checkParameters(FILES_TO_PROCESS, FILES_AT_ONCE, SORT_ORDER, MAX_RUN_MINUTES, TRIES);
+if(parameterError != "No_Errors"){
+    out["Parameter_Error"] = parameterError;
+    return out;
+}
 
-    var uuid = GetUUIDv4();
-    var copyTemplate = ExecuteSingleValueQuery("TEMPLATE", "select " + COPY_TEMPLATE + "() as TEMPLATE;");
+if(countDuplicateFiles(CONTROL_TABLE)){
+    out["Duplicate_Files_Error"] = "There are duplicate files in the control table. De-duplicate before running.";
+    return out;
+}
 
-    var endTime = new Date().getTime() + MAX_RUN_MINUTES * 60000;
-    var isEndTime = 0;
+let i = 0;
+let filesClaimed = -1;
+let filesProcessed = 0;
+let filesRS;
+let passes = Math.ceil(FILES_TO_PROCESS / FILES_AT_ONCE);
 
-    out["Session_ID"] = ExecuteSingleValueQuery("SESSION", "select current_session() as SESSION;");
-    out["Start_Time"] = Date2Timestamp(new Date());
+let uuid = getUUIDv4();
+let endTime = new Date().getTime() + MAX_RUN_MINUTES * 60000;
+let isEndTime = 0;
 
-    for (i = 0; i < passes && isEndTime == 0; i++){
+out["Session_ID"] = executeSingleValueQuery("SESSION", "select current_session() as SESSION;");
+out["Start_Time"] = date2Timestamp(new Date());
 
-        filesClaimed = ClaimFiles(CONTROL_TABLE, TRIES, FILES_AT_ONCE, SORT_ORDER, uuid);
+for (i = 0; i < passes && isEndTime == 0; i++){
+    try{
+        filesClaimed = claimFiles(CONTROL_TABLE, TRIES, FILES_AT_ONCE, SORT_ORDER, uuid);
         if (filesClaimed == 0){
-            out["Termination_Reason"] = "Processed_All_Waiting_Files";            
-            break;  // No more files to claim. All files processed.
+            out["Termination_Reason"] = "Processed_All_Waiting_Files";
+            break;
         }
+        filesRS = loadFiles(CONTROL_TABLE, COPY_STATEMENTS_TABLE, uuid);
         filesProcessed += filesClaimed;
-
-        filesRS = LoadFiles(CONTROL_TABLE, copyTemplate, uuid);
-
-        MarkCompleteFiles(CONTROL_TABLE, filesRS);
-
+        markCompleteFiles(CONTROL_TABLE, filesRS);
         if (new Date().getTime() >= endTime){
             out["Termination_Reason"] = "Time_Limit";
             isEndTime = 1;
         }
     }
-
-    if (filesProcessed >= FILES_TO_PROCESS){
-        out["Termination_Reason"] = "File_Limit";
+    catch(err){
+        out["Termination_Reason"] = "ERROR: " + err.message.replace(/"/g, '"');
+        break;
     }
+}
 
-    out["Files_Processed"] = filesProcessed;
-    out["End_Time"] = Date2Timestamp(new Date());
-    out["UUID"] = uuid;
+if (filesProcessed >= FILES_TO_PROCESS){
+    out["Termination_Reason"] = "File_Limit";
+}
 
-    return out;
+out["Files_Processed"] = filesProcessed;
+out["End_Time"] = date2Timestamp(new Date());
+out["UUID"] = uuid;
+
+return out;
 
 /***************************************************************************************************
-*                                                                                                  *
 *  End of main function                                                                            *
-*                                                                                                  *
 ***************************************************************************************************/
 
-function ClaimFiles(controlTable, tries, filesAtOnce, sortOrder, uuid){
-
-    sql = GetClaimFilesSQL(controlTable, tries, filesAtOnce, sortOrder, uuid);
-
-    return ExecuteFirstValueQuery(sql);
+function countDuplicateFiles(controlTable){
+    let sql = getCheckDuplicateSQL(controlTable);
+    return executeSingleValueQuery("DUPLICATES", sql);
 }
 
-function LoadFiles(controlTable, copyTemplate, uuid){
-
-    var fileSQL = GetFileListSQL(controlTable, uuid);
-
-    var fileList = ExecuteSingleValueQuery("FILE_LIST", fileSQL);
-
-    sql = GetCopyIntoSQL(copyTemplate, fileList);
-
-    return GetResultSet(sql);
+function claimFiles(controlTable, tries, filesAtOnce, sortOrder, uuid){
+    let sql = getClaimFilesSQL(controlTable, tries, filesAtOnce, sortOrder, uuid);
+    return executeFirstValueQuery(sql);
 }
 
-function MarkCompleteFiles(controlTable, fileRS){
-
-    var loadResults = GetLoadResults(fileRS)
-
-    var sql = GetMarkCompletedFilesSQL(controlTable, loadResults)
-
-    // CHANGE THIS TO GET THE UPDATED ROWS 
-    ExecuteNonQuery(sql);
-
+function loadFiles(controlTable, copyStatementsTable ,uuid){
+    let fileSQL = getFileListSQL(controlTable, copyStatementsTable, uuid);
+    let rs = getResultSet(fileSQL);
+    rs.next();
+    let sql = getCopyIntoSQL(rs.getColumnValue("FILE_LIST"), rs.getColumnValue("STATEMENT_TEXT"));
+    return getResultSet(sql);
 }
 
-function GetLoadResults(filesRS){
+function markCompleteFiles(controlTable, fileRS){
+    let loadResults = getLoadResults(fileRS)
+    let sql = getMarkCompletedFilesSQL(controlTable, loadResults)
+    executeNonQuery(sql);
+}
 
-    var s = '';
-    var f = [];
-    var i = 0;
+function getLoadResults(filesRS){
+
+    if (filesRS instanceof Error){
+        throw filesRS;
+    }
+
+    let s = '';
+    let f = [];
+    let i = 0;
+    
+    let file = '';
+    let status = '';
+    let first_error = '';
 
     while(filesRS.next()){
-        f.push( "('" + filesRS.getColumnValue("file") + "','" +
-                       filesRS.getColumnValue("status") + "','" +
-                       filesRS.getColumnValue("first_error") + "')");
+        file        = filesRS.getColumnValue("file").replace(/'/g, "''");
+        status      = filesRS.getColumnValue("status").replace(/'/g, "''");
+        first_error = filesRS.getColumnValue("first_error");
+        
+        if (first_error != null){
+            first_error = EscapeLiteralString(first_error);
+        } 
+        else {
+            first_error = "";
+        }
+        f.push( "('" + file + "','" + status + "','" + first_error + "')");
     }
-    
+
     for (i = 0; i < f.length - 1; i++){
         s += f[i] + ",\n";
     }
@@ -278,16 +292,16 @@ function GetLoadResults(filesRS){
     return s;
 }
 
-function GetCopyFileList(rs, filesAtOnce){
+function getCopyFileList(rs, filesAtOnce){
 
-    var s = '';
+    let s = '';
 
     for (var i = 0; i < filesAtOnce; i++){
         if (rs.next()){
             if (i > 0) {
                 s += ',';
             }
-            s += "'" + ShortenFilePath(rs.getColumnValue("FILE_PATH")) + "'";
+            s += "'" + shortenFilePath(rs.getColumnValue("FILE_PATH")) + "'";
         } else {
             break;
         }
@@ -295,9 +309,9 @@ function GetCopyFileList(rs, filesAtOnce){
     return s;
 }
 
-function ShortenFilePath(filePath){
+function shortenFilePath(filePath){
 
-    var doubleSlash = filePath.indexOf("//");
+    let doubleSlash = filePath.indexOf("//");
 
     if (doubleSlash == -1){
         return filePath.substring(filePath.indexOf("/") + 1);
@@ -307,7 +321,7 @@ function ShortenFilePath(filePath){
     } 
 }
 
-function GetControlQuery(CONTROL_TABLE, TRIES, ORDER_BY, FILES_TO_PROCESS) {
+function getControlQuery(CONTROL_TABLE, TRIES, ORDER_BY, FILES_TO_PROCESS) {
 
     return "select FILE_PATH from " + CONTROL_TABLE + " where INGESTION_STATUS = 'WAITING' and TRY_COUNT < " + TRIES +
            " order by INGESTION_ORDER " + ORDER_BY + " limit " + FILES_TO_PROCESS + ";";
@@ -315,11 +329,9 @@ function GetControlQuery(CONTROL_TABLE, TRIES, ORDER_BY, FILES_TO_PROCESS) {
 }
 
 /***************************************************************************************************
-*                                                                                                  *
 *  Error and Exception Handling                                                                    *
-*                                                                                                  *
 ***************************************************************************************************/
-function CheckParameters(filesToProcess, filesAtOnce, sortOrder, maxRunMinutes, tries){
+function checkParameters(filesToProcess, filesAtOnce, sortOrder, maxRunMinutes, tries){
 
     if(filesToProcess <= 0){
         return "FILES_TO_PROCESS parameter must be greater than 0,";
@@ -341,73 +353,84 @@ function CheckParameters(filesToProcess, filesAtOnce, sortOrder, maxRunMinutes, 
 }
 
 /***************************************************************************************************
-*                                                                                                  *
 *  SQL Template Functions                                                                          *
-*                                                                                                  *
 ***************************************************************************************************/
 
-function GetClaimFilesSQL(controlTable, tries, filesToProcess, sortOrder, uuid){
+function getCheckDuplicateSQL(controlTable){
 
-var sql = 
-`
+return `
+select  count(FILE_PATH)                as FILES_COUNT,
+        count(distinct FILE_PATH)       as FILES_DISTINCT,
+        FILES_COUNT - FILES_DISTINCT    as DUPLICATES
+from    ${controlTable};
+`;
+
+}
+
+function getClaimFilesSQL(controlTable, tries, filesAtOnce, sortOrder, uuid){
+
+return `
 -- CLAIM NEXT FILES
-update @~CONTROL_TABLE~@ set
-       INGESTION_STATUS = 'LOADING',
+update FILE_INGEST_CONTROL
+set    INGESTION_STATUS = 'LOADING',
        OWNER_SESSION    = current_session(),
-       EXEC_UUID        = '@~EXEC_UUID~@',
+       EXEC_UUID        = '${uuid}',
        TRY_COUNT        = TRY_COUNT + 1,
        START_TIME       = to_timestamp_ntz(current_timestamp())
-where  
-       (EXEC_UUID is null or EXEC_UUID = '@~EXEC_UUID~@')
-            and
-       (TRY_COUNT < @~TRIES~@)
-            and
-       FILE_PATH in 
-       (
-         select   FILE_PATH
-         from     @~CONTROL_TABLE~@
-         where    INGESTION_STATUS = 'WAITING'    -- Need to "or" other options here such as error notices
-         order by INGESTION_ORDER @~SORT_ORDER~@
-         limit    @~FILES_AT_ONCE~@
-       );
+where  FILE_PATH in
+(
+    with 
+    FIRST_FILE(COPY_INTO_NAME) as
+    (
+        select   COPY_INTO_NAME
+        from     FILE_INGEST_CONTROL
+        where    INGESTION_STATUS = 'WAITING' and 
+                 TRY_COUNT < ${tries}
+        order by INGESTION_ORDER ${sortOrder}
+        limit    1
+    ),
+    FILE_LIST(FILE_PATH, COPY_INTO_NAME) as
+    (
+        select   FILE_PATH,
+                 COPY_INTO_NAME
+        from     FILE_INGEST_CONTROL
+        where    INGESTION_STATUS = 'WAITING' and
+                 TRY_COUNT < ${tries}
+        order by INGESTION_ORDER ${sortOrder}
+    )
+    select  FILE_PATH
+    from    FILE_LIST L,
+            FIRST_FILE F
+    where   L.COPY_INTO_NAME = F.COPY_INTO_NAME
+    limit   ${filesAtOnce}
+)
 `;
-
-sql = sql.replace(/@~CONTROL_TABLE~@/g,     controlTable);
-sql = sql.replace(/@~TRIES~@/g,             tries);
-sql = sql.replace(/@~FILES_AT_ONCE~@/g,     filesToProcess);
-sql = sql.replace(/@~SORT_ORDER~@/g,        sortOrder);
-sql = sql.replace(/@~EXEC_UUID~@/g,         uuid);
-
-return sql;
 }
 
-function GetFileListSQL(controlTable, uuid){
+function getFileListSQL(controlTable, copyStatementsTable, uuid){
 
-var sql =
-`
-select   listagg('\\n\\'' || stage_path_shorten(FILE_PATH) || '\\'', ',')
-         as FILE_LIST
-from     @~CONTROL_TABLE~@ 
-where    INGESTION_STATUS = 'LOADING' and EXEC_UUID = '@~EXEC_UUID~@'
+return `
+select   listagg('\\n\\'' || stage_path_shorten(F.FILE_PATH) || '\\'', ',') as FILE_LIST,
+         any_value(F.COPY_INTO_NAME) as COPY_INTO_NAME,
+         any_value(C.STATEMENT_TEXT) as STATEMENT_TEXT
+from     ${controlTable}  F
+join     ${copyStatementsTable} C
+    on   F.COPY_INTO_NAME = C.STATEMENT_NAME
+where    INGESTION_STATUS = 'LOADING' and EXEC_UUID = '${uuid}' and
+         C.EFFECTIVE <= current_timestamp and (C.SUPERSEDED is null or C.SUPERSEDED > current_timestamp)
 order by INGESTION_ORDER;
 `;
-
-sql = sql.replace(/@~CONTROL_TABLE~@/g, controlTable);
-sql = sql.replace(/@~EXEC_UUID~@/g, uuid);
-
-return sql;
 }
 
-function GetMarkCompletedFilesSQL(fileIngestControlTable, loadResults){
+function getMarkCompletedFilesSQL(controlTable, loadResults){
 
-var sql = 
-`
+return `
 --MARK FINISHED FILES
-merge into @~CONTROL_TABLE~@ C 
+merge into ${controlTable} C 
       using 
       (
         select FILE_PATH, LOAD_STATUS, FIRST_ERROR from (values 
-@~LOAD_RESULTS~@
+${loadResults}
           )
         as L(FILE_PATH, LOAD_STATUS, FIRST_ERROR)
       ) L
@@ -419,90 +442,60 @@ when matched then
       C.END_TIME         = to_timestamp_ntz(current_timestamp()),
       C.EXEC_UUID        = null;
 `;
-
-sql = sql.replace(/@~CONTROL_TABLE~@/g, fileIngestControlTable);
-sql = sql.replace(/@~LOAD_RESULTS~@/g, loadResults);
-
-return sql;
 }
+  
+function getCopyIntoSQL(fileList, copyTemplate){
 
-function GetCopyIntoSQL(copyTemplate, fileList){
+return `${copyTemplate}\nfiles=(${fileList})`;
 
-var sql = copyTemplate.replace("@~FILE_LIST~@", fileList);
-
-return sql;
 }
 
 /***************************************************************************************************
-*                                                                                                  *
 *  SQL functions                                                                                   *
-*                                                                                                  *
 ***************************************************************************************************/
 
-function GetResultSet(sql){
-    cmd1 = {sqlText: sql};
-    stmt = snowflake.createStatement(cmd1);
-    var rs;
-    rs = stmt.execute();
+function getResultSet(sql){
+    let cmd  = {sqlText: sql};
+    let stmt = snowflake.createStatement(cmd);
+    let rs   = stmt.execute();
     return rs;
 }
 
-function ExecuteNonQuery(queryString) {
-    var out = '';
-    cmd1 = {sqlText: queryString};
-    stmt = snowflake.createStatement(cmd1);
-    var rs;
-
-    rs = stmt.execute();
+function executeNonQuery(queryString) {
+    let out = '';
+    let cmd = {sqlText: queryString};
+    let stmt = snowflake.createStatement(cmd);
+    let rs = stmt.execute();
 }
 
-function ExecuteSingleValueQuery(columnName, queryString) {
-    var out;
-    cmd1 = {sqlText: queryString};
-    stmt = snowflake.createStatement(cmd1);
-    var rs;
-    try{
-        rs = stmt.execute();
-        rs.next();
-        return rs.getColumnValue(columnName);
-    }
-    catch(err) {
-        if (err.message.substring(0, 18) == "ResultSet is empty"){
-            throw "ERROR: No rows returned in query.";
-        } else {
-            throw "ERROR: " + err.message.replace(/\n/g, " ");
-        } 
-    }
-    return out;
+function executeSingleValueQuery(columnName, queryString) {
+    let cmd  = {sqlText: queryString};
+    let stmt = snowflake.createStatement(cmd);
+    let rs   = stmt.execute();
+    rs.next();
+    return rs.getColumnValue(columnName);
 }
 
-function ExecuteFirstValueQuery(queryString) {
-    var out;
-    cmd1 = {sqlText: queryString};
-    stmt = snowflake.createStatement(cmd1);
-    var rs;
-    try{
-        rs = stmt.execute();
-        rs.next();
-        return rs.getColumnValue(1);
-    }
-    catch(err) {
-        if (err.message.substring(0, 18) == "ResultSet is empty"){
-            throw "ERROR: No rows returned in query.";
-        } else {
-            throw "ERROR: " + err.message.replace(/\n/g, " ");
-        } 
-    }
-    return out;
+function executeFirstValueQuery(queryString) {
+    let cmd  = {sqlText: queryString};
+    let stmt = snowflake.createStatement(cmd);
+    let rs   = stmt.execute();
+    rs.next();
+    return rs.getColumnValue(1);
 }
 
 /***************************************************************************************************
-*                                                                                                  *
 *  Library functions                                                                               *
-*                                                                                                  *
 ***************************************************************************************************/
 
-function GetUUIDv4() {
+function escapeLiteralString(str){
+    str = str.replace(/'/g, "''");
+    str = str.replace(/\\/g, "\\\\");
+    str = str.replace(/(\r\n|\n|\r)/gm," ");
+    return str;
+}
+
+function getUUIDv4() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, 
         function(c){
             var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -511,33 +504,120 @@ function GetUUIDv4() {
     );
 }
 
-function Date2Timestamp(date){
+function date2Timestamp(date){
 
-    var yyyy = date.getFullYear();
-    var dd   = date.getDate();
-    var mm   = (date.getMonth() + 1);
+    let yyyy = date.getFullYear();
+    let dd   = date.getDate();
+    let mm   = (date.getMonth() + 1);
 
-    if (dd < 10)
-        dd = "0" + dd;
+    if (dd < 10) dd = "0" + dd;
+    if (mm < 10) mm = "0" + mm;
 
-    if (mm < 10)
-        mm = "0" + mm;
+    let cur_day = yyyy + "-" + mm + "-" + dd;
+    let hours   = date.getHours()
+    let minutes = date.getMinutes()
+    let seconds = date.getSeconds();
 
-    var cur_day = yyyy + "-" + mm + "-" + dd;
-
-    var hours   = date.getHours()
-    var minutes = date.getMinutes()
-    var seconds = date.getSeconds();
-
-    if (hours < 10)
-        hours = "0" + hours;
-
-    if (minutes < 10)
-        minutes = "0" + minutes;
-
-    if (seconds < 10)
-        seconds = "0" + seconds;
+    if (hours < 10) hours = "0" + hours;
+    if (minutes < 10) minutes = "0" + minutes;
+    if (seconds < 10) seconds = "0" + seconds;
 
     return cur_day + " " + hours + ":" + minutes + ":" + seconds;
 }
+$$;
+
+/****************************************************************************************************
+*  Function to display a progress bar in a column.                                                  *
+****************************************************************************************************/
+create or replace function PROGRESS_BAR(PERCENTAGE float, DECIMALS float, SEGMENTS float)
+returns string
+language javascript
+strict immutable
+as
+$$
+    let percent = PERCENTAGE;
+
+    if (isNaN(percent)) percent =   0;
+    if (percent < 0)    percent =   0;
+    if (percent > 100)  percent = 100;
+
+    percent = percent.toFixed(DECIMALS);
+
+    let filledSegments = Math.round(SEGMENTS * (percent / 100));
+    let emptySegments  = SEGMENTS - filledSegments;
+
+    let bar = '⬛'.repeat(filledSegments) + '⬜'.repeat(emptySegments);
+
+    return bar + " " + percent + "%";
+$$;
+ 
+-- This is an overload with only the percentage, using defaults for 
+-- number of segments and decimal points to display on percentage.
+create or replace function PROGRESS_BAR(PERCENTAGE float)
+returns string
+language sql
+as
+$$
+    select progress_bar(PERCENTAGE, 2, 10)
+$$;
+ 
+-- This is an overload with the percentage and the option set for the
+-- number of decimals to display. It uses a default for number of segments.
+create or replace function PROGRESS_BAR(PERCENTAGE float, DECIMALS float)
+returns string
+language sql
+as
+$$
+    select progress_bar(PERCENTAGE, DECIMALS, 10)
+$$;
+
+/****************************************************************************************************
+*  Returns the number of nodes for a given named cluster size                                       *
+****************************************************************************************************/
+create or replace function NODES_PER_WAREHOUSE(WAREHOUSE_SIZE string)
+returns integer
+language SQL
+as
+$$
+    case upper(WAREHOUSE_SIZE)
+        when 'X-SMALL'  then 1
+        when 'XSMALL'   then 1
+        when 'XS'       then 1
+        when 'SMALL'    then 2
+        when 'S'        then 2
+        when 'MEDIUM'   then 4
+        when 'M'        then 4
+        when 'LARGE'    then 8
+        when 'L'        then 8
+        when 'X-LARGE'  then 16
+        when 'XLARGE'   then 16
+        when 'XL'       then 16
+        when '2X-LARGE' then 32
+        when '2XLARGE'  then 32
+        when '2XL'      then 32
+        when '3X-LARGE' then 64
+        when '3XLARGE'  then 64
+        when '3XL'      then 64
+        when '4X-LARGE' then 128
+        when '4XLARGE'  then 128
+        when '4XL'      then 128
+        when '5X-LARGE' then 256
+        when '5XLARGE'  then 256
+        when '5XL'      then 256
+        when '6X-LARGE' then 512
+        when '6XLARGE'  then 512
+        when '6XL'      then 512
+        else            null
+    end
+$$;
+         
+/****************************************************************************************************
+*  Convert the last modified value from the Snowflake LIST command into a timestamp.                *
+****************************************************************************************************/
+create or replace function LAST_MODIFIED_TO_TIMESTAMP(LAST_MODIFIED string) 
+returns timestamp_tz
+language sql
+as
+$$
+    to_timestamp_tz(left(LAST_MODIFIED, len(LAST_MODIFIED) - 4) || ' ' || '00:00', 'DY, DD MON YYYY HH:MI:SS TZH:TZM')
 $$;
