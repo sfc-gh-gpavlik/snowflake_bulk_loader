@@ -1,5 +1,25 @@
 -- Worksheet 05.Bulk Load - Runtime
--- Last modified 2020-04-17
+-- Last modified 2021-08-04
+
+/********************************************************************************************************
+*                                                                                                       *
+*                                     Snowflake Bulk Load Project                                       *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+*  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in  *
+*. compliance with the License. You may obtain a copy of the License at                                 *
+*                                                                                                       *
+*                               http://www.apache.org/licenses/LICENSE-2.0                              *
+*                                                                                                       *
+*  Unless required by applicable law or agreed to in writing, software distributed under the License    *
+*  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  *
+*  implied. See the License for the specific language governing permissions and limitations under the   *
+*  License.                                                                                             *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+********************************************************************************************************/
 
 /****************************************************************************************************
 *                                                                                                   *
@@ -14,7 +34,9 @@
 ****************************************************************************************************/
 
 -- See rows going into the target table:
-select to_varchar(count(*), '999,999,999,999,999,999') as ROW_COUNT from TARGET_TABLE;
+select (select to_varchar(count(*), '999,999,999,999,999,999') from JORDERS) as JORDERS_COUNT,
+       (select to_varchar(count(*), '999,999,999,999,999,999') from ORDERS) as ORDERS_COUNT,
+       (select to_varchar(count(*), '999,999,999,999,999,999') from LINEITEM) as LINEITEM_COUNT;
 
 -- Big progress bar to refresh periodically:
 with
@@ -22,9 +44,9 @@ PCT_COMPLETE (PERCENT_COMPLETE) as
 (
     select 
         (select sum(FILE_SIZE) from FILE_INGEST_CONTROL where INGESTION_STATUS = 'LOADED') /  /* Numerator   */
-        (select sum(FILE_SIZE) from FILE_INGEST_CONTROL) * 100 as PERCENT_COMPLETE            /* Denominator */
+        (select sum(FILE_SIZE) from FILE_INGEST_CONTROL) * 100 as PERCENT_COMPLETE           /* Denominator */
 )
-select progress_bar(PERCENT_COMPLETE, 2, 67) as PROGRESS from PCT_COMPLETE;
+select progress_bar(PERCENT_COMPLETE, 2, 100) as PROGRESS from PCT_COMPLETE;
 
 -- Get the progress and ETA.
 -- NOTE: These results will only be accurate for a continuous run of the bulk load utility.
