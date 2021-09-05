@@ -1,5 +1,25 @@
 -- Worksheet 04.Bulk Load - Unit Test
--- Last modified 2020-04-17
+-- Last modified 2021-09-04
+
+/********************************************************************************************************
+*                                                                                                       *
+*                                     Snowflake Bulk Load Project                                       *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+*  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in  *
+*. compliance with the License. You may obtain a copy of the License at                                 *
+*                                                                                                       *
+*                               http://www.apache.org/licenses/LICENSE-2.0                              *
+*                                                                                                       *
+*  Unless required by applicable law or agreed to in writing, software distributed under the License    *
+*  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or  *
+*  implied. See the License for the specific language governing permissions and limitations under the   *
+*  License.                                                                                             *
+*                                                                                                       *
+*  Copyright (c) 2020, 2021 Snowflake Computing Inc. All rights reserved.                               *
+*                                                                                                       *
+********************************************************************************************************/
 
 /****************************************************************************************************
 *                                                                                                   *
@@ -16,23 +36,28 @@
 *                                                                                                   *
 ****************************************************************************************************/
 
-alter warehouse TEST set warehouse_size = 'XSmall';
+-- Check the Ingestion Control Table:
+select * from FILE_INGEST_CONTROL;
 
--- Set some variables to make it more obvious what each parameter means:
-set SORT_ORDER      = 'ASC';    -- The column that controls the order of file loading
-set FILES_TO_LOAD   = 16;       -- The total number of files to process in one procedure run
-set FILES_AT_ONCE   = 8;        -- The number of files to load in a single transaction 
-set MAX_RUN_MINUTES = 1;        -- The maximum run time allowed for a new pass to start 
-set TRIES           = 2;        -- The times to retry failed loads 
+-- The unit test only requires an X-Small warehouse.
+alter warehouse TEST set warehouse_size = 'X-Small';
 
--- Copy 16 files, 8 files at a time with a maxumum run time of 1 minute. Retry files up to 3 times.
-call FILE_INGEST('TEST_STAGE', 'GetCopyTemplate', 'FILE_INGEST_CONTROL', $SORT_ORDER, $FILES_TO_LOAD, $FILES_AT_ONCE, $MAX_RUN_MINUTES, $TRIES);   
-
--- Alternatively, you can run without setting variables (only using them to make the call more readable).
-call file_ingest('TEST_STAGE', 'GetCopyTemplate', 'FILE_INGEST_CONTROL', 'ASC', 16, 8, 1, 3);
+/****************************************************************************************************
+*                                                                                                   *
+* Run a small unit test. When you run a full scale jobs in parallel, do NOT use these test values.  *
+* Go to worksheet 03. Bulk Load - Set/Reset and run the last two SQL statements to get recommended  *
+* values for the warehouse size and FILE_INGEST parameters.                                         *
+*                                                                                                   *
+****************************************************************************************************/
+call file_ingest('TEST_STAGE', 'FILE_INGEST_CONTROL', 'COPY_INTO_STATEMENTS', 'ASC', 16, 8, 20, 3);
 
 -- Examine the control table.
 select * from FILE_INGEST_CONTROL where INGESTION_STATUS <> 'WAITING' order by INGESTION_ORDER desc;
 
 -- Check on loaded rows
-select count(*) from TARGET_TABLE;
+select (select count(*) from JORDERS) as JORDERS_COUNT,
+       (select count(*) from ORDERS) as ORDERS_COUNT,
+       (select count(*) from LINEITEM) as LINEITEM_COUNT;
+
+-- Check to see if there are any errors noted in the control table:
+select * from FILE_INGEST_CONTROL where error_msg <> '';
