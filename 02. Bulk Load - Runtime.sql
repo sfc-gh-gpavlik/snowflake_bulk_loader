@@ -1,5 +1,5 @@
 -- Worksheet 02.Bulk Load - Runtime
--- Last modified 2021-09-04
+-- Last modified 2021-09-10
 
 /********************************************************************************************************
 *                                                                                                       *
@@ -162,7 +162,7 @@ $$
 * @param  {string}  CONTROL_TABLE:        The name of the table that controls this procedure        *
 * @param  {string}  COPY_STATEMENTS_TABLE The name of the table with the copy into statements.      *
 * @param  {string}  SORT_ORDER:           The column that controls the order of file loading        *
-* @param  {string}  FILES_TO_PROCESS:     The total number of files to process in one procedure run *
+* @param  {float}   FILES_TO_PROCESS:     The total number of files to process in one procedure run *
 * @param  {float}   FILES_AT_ONCE:        The number of files to load in a single transaction       *
 * @param  {float}   MAX_RUN_MINUTES:      The maximum run time allowed for a new pass to start      *
 * @param  {float}   TRIES float           The times to try loading a file, If > 1 it will retry     *
