@@ -25,7 +25,6 @@
 *                                                                                                   *
 *                              ***  Snowflake Bulk Load Project  ***                                *          
 *                                                                                                   *
-*  https://drive.google.com/drive/folders/13LF-H-sAKGBkiR7HnYDyKiFlULYgaFDd                         *
 *                                                                                                   *
 *  ==> Purpose: This project loads a large number of files from stage to a table in a specified     *
 *               order. You can create these objects in any database you choose. You must create     *
