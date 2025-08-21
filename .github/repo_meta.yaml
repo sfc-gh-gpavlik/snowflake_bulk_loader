@@ -1,0 +1,13 @@
+name: Snowflake_bulk_loader
+description: A stored procedure project to load and track a high number of files for ingestion
+owner: Greg Pavlik
+contacts:
+  - email: greg@pavlik.us         
+    role: maintainer
+visibility: public                
+criticality: low                 
+lifecycle: active                
+data_classification: none       
+compliance: []                   
+service_tier: 3            
+default_branch: main
