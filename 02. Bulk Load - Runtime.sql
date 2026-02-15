@@ -370,7 +370,7 @@ function getClaimFilesSQL(controlTable, tries, filesAtOnce, sortOrder, uuid){
 
 return `
 -- CLAIM NEXT FILES
-update FILE_INGEST_CONTROL
+update ${controlTable}
 set    INGESTION_STATUS = 'LOADING',
        OWNER_SESSION    = current_session(),
        EXEC_UUID        = '${uuid}',
@@ -382,7 +382,7 @@ where  FILE_PATH in
     FIRST_FILE(COPY_INTO_NAME) as
     (
         select   COPY_INTO_NAME
-        from     FILE_INGEST_CONTROL
+        from     ${controlTable}
         where    INGESTION_STATUS = 'WAITING' and 
                  TRY_COUNT < ${tries}
         order by INGESTION_ORDER ${sortOrder}
@@ -392,7 +392,7 @@ where  FILE_PATH in
     (
         select   FILE_PATH,
                  COPY_INTO_NAME
-        from     FILE_INGEST_CONTROL
+        from     ${controlTable}
         where    INGESTION_STATUS = 'WAITING' and
                  TRY_COUNT < ${tries}
         order by INGESTION_ORDER ${sortOrder}
